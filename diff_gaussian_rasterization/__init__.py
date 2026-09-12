@@ -23,6 +23,7 @@ def rasterize_gaussians(
     means2D,
     sh,
     colors_precomp,
+    seg_encoding,
     opacities,
     scales,
     rotations,
@@ -34,6 +35,7 @@ def rasterize_gaussians(
         means2D,
         sh,
         colors_precomp,
+        seg_encoding,
         opacities,
         scales,
         rotations,
@@ -49,6 +51,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         means2D,
         sh,
         colors_precomp,
+        seg_encoding,
         opacities,
         scales,
         rotations,
@@ -61,6 +64,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.bg, 
             means3D,
             colors_precomp,
+            seg_encoding,
             opacities,
             scales,
             rotations,
@@ -81,27 +85,28 @@ class _RasterizeGaussians(torch.autograd.Function):
         )
 
         # Invoke C++/CUDA rasterizer
-        num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, invdepths = _C.rasterize_gaussians(*args)
+        num_rendered, color, rendered_seg, radii, geomBuffer, binningBuffer, imgBuffer, invdepths = _C.rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer)
-        return color, radii, invdepths
+        ctx.save_for_backward(colors_precomp, seg_encoding, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer)
+        return color, rendered_seg, radii, invdepths
 
     @staticmethod
-    def backward(ctx, grad_out_color, _, grad_out_depth):
+    def backward(ctx, grad_out_color, grad_out_seg, _, grad_out_depth):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
-        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        colors_precomp, seg_encoding, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
                 means3D, 
                 radii, 
                 colors_precomp, 
+                seg_encoding,
                 opacities,
                 scales, 
                 rotations, 
@@ -113,6 +118,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raster_settings.tanfovy, 
                 grad_out_color,
                 grad_out_depth, 
+                grad_out_seg,
                 sh, 
                 raster_settings.sh_degree, 
                 raster_settings.campos,
@@ -124,18 +130,19 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raster_settings.debug)
 
         # Compute gradients for relevant tensors by invoking backward method
-        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)        
+        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations, grad_seg_encoding = _C.rasterize_gaussians_backward(*args)        
 
         grads = (
-            grad_means3D,
-            grad_means2D,
-            grad_sh,
-            grad_colors_precomp,
-            grad_opacities,
-            grad_scales,
-            grad_rotations,
-            grad_cov3Ds_precomp,
-            None,
+            grad_means3D,          # means3D
+            grad_means2D,          # means2D
+            grad_sh,               # sh
+            grad_colors_precomp,   # colors_precomp
+            grad_seg_encoding,     # seg_encoding (must match forward's input order)
+            grad_opacities,        # opacities
+            grad_scales,           # scales
+            grad_rotations,        # rotations
+            grad_cov3Ds_precomp,   # cov3Ds_precomp
+            None,                  # raster_settings
         )
 
         return grads
@@ -171,7 +178,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, seg_encoding = None):
         
         raster_settings = self.raster_settings
 
@@ -181,6 +188,9 @@ class GaussianRasterizer(nn.Module):
         if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
             raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
         
+        if seg_encoding is None:
+            raise Exception('seg_encoding is required: pass pc.get_segmentation_encoding')
+
         if shs is None:
             shs = torch.Tensor([])
         if colors_precomp is None:
@@ -199,6 +209,7 @@ class GaussianRasterizer(nn.Module):
             means2D,
             shs,
             colors_precomp,
+            seg_encoding,
             opacities,
             scales, 
             rotations,
