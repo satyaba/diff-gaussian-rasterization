@@ -14,6 +14,7 @@
 #include <iostream>
 #include <vector>
 #include "rasterizer.h"
+#include "config.h"
 #include <cuda_runtime_api.h>
 
 namespace CudaRasterizer
@@ -37,6 +38,7 @@ namespace CudaRasterizer
 		float* cov3D;
 		float4* conic_opacity;
 		float* rgb;
+		float* seg_features;
 		uint32_t* point_offsets;
 		uint32_t* tiles_touched;
 
