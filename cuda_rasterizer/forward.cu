@@ -159,6 +159,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
+	const float* seg_encoding,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const glm::vec3* cam_pos,
@@ -170,6 +171,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* depths,
 	float* cov3Ds,
 	float* rgb,
+	float* out_seg_features,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
@@ -254,6 +256,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		rgb[idx * C + 2] = result.z;
 	}
 
+	// Raw passthrough: stage the per-Gaussian segmentation encoding for
+	// renderCUDA. Unconditional (not tied to the SH path). No activation
+	// here — the decoder owns the only nonlinearity.
+	for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+		out_seg_features[idx * NUM_SEG_CHANNELS + ch] = seg_encoding[idx * NUM_SEG_CHANNELS + ch];
+
 	// Store some useful helper data for the next steps.
 	depths[idx] = p_view.z;
 	radii[idx] = my_radius;
@@ -279,11 +287,13 @@ renderCUDA(
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
+	const float* __restrict__ seg_features,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
+	float* __restrict__ out_seg,
 	const float* __restrict__ depths,
 	float* __restrict__ invdepth)
 {
@@ -316,6 +326,7 @@ renderCUDA(
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
+	float S[NUM_SEG_CHANNELS] = { 0 };
 
 	float expected_invdepth = 0.0f;
 
@@ -371,6 +382,12 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
+			// Segmentation compositing: same alpha/T weight as color, direct
+			// global read via collected_id (no shared-memory staging — 32
+			// channels would cost ~32 KB/block and tank occupancy).
+			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+				S[ch] += seg_features[collected_id[j] * NUM_SEG_CHANNELS + ch] * alpha * T;
+
 			if(invdepth)
 			expected_invdepth += (1 / depths[collected_id[j]]) * alpha * T;
 
@@ -391,6 +408,11 @@ renderCUDA(
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 
+		// No background term for segmentation: unfilled space decodes to
+		// near-zero encoding (locked decision).
+		for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+			out_seg[ch * H * W + pix_id] = S[ch];
+
 		if (invdepth)
 		invdepth[pix_id] = expected_invdepth;// 1. / (expected_depth + T * 1e3);
 	}
@@ -403,11 +425,13 @@ void FORWARD::render(
 	int W, int H,
 	const float2* means2D,
 	const float* colors,
+	const float* seg_features,
 	const float4* conic_opacity,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
+	float* out_seg,
 	float* depths,
 	float* depth)
 {
@@ -417,12 +441,14 @@ void FORWARD::render(
 		W, H,
 		means2D,
 		colors,
+		seg_features,
 		conic_opacity,
 		final_T,
 		n_contrib,
 		bg_color,
 		out_color,
-		depths, 
+		out_seg,
+		depths,
 		depth);
 }
 
@@ -436,6 +462,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
+	const float* seg_encoding,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const glm::vec3* cam_pos,
@@ -447,6 +474,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* depths,
 	float* cov3Ds,
 	float* rgb,
+	float* out_seg_features,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
@@ -464,7 +492,8 @@ void FORWARD::preprocess(int P, int D, int M,
 		clamped,
 		cov3D_precomp,
 		colors_precomp,
-		viewmatrix, 
+		seg_encoding,
+		viewmatrix,
 		projmatrix,
 		cam_pos,
 		W, H,
@@ -475,6 +504,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		depths,
 		cov3Ds,
 		rgb,
+		out_seg_features,
 		conic_opacity,
 		grid,
 		tiles_touched,
