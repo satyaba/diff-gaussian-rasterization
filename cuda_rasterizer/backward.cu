@@ -459,15 +459,18 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
+	const float* __restrict__ seg_features,
 	const float* __restrict__ depths,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_dpixels_seg,
 	const float* __restrict__ dL_invdepths,
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
+	float* __restrict__ dL_dseg_encoding,
 	float* __restrict__ dL_dinvdepths
 )
 {
@@ -507,12 +510,18 @@ renderCUDA(
 
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
+	float accum_rec_seg[NUM_SEG_CHANNELS] = { 0 };
+	float last_seg[NUM_SEG_CHANNELS] = { 0 };
+	float dL_dpixel_seg[NUM_SEG_CHANNELS] = { 0 };
 	float dL_invdepth;
 	float accum_invdepth_rec = 0;
 	if (inside)
 	{
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
+		if (dL_dpixels_seg)
+			for (int i = 0; i < NUM_SEG_CHANNELS; i++)
+				dL_dpixel_seg[i] = dL_dpixels_seg[i * H * W + pix_id];
 		if(dL_invdepths)
 		dL_invdepth = dL_invdepths[pix_id];
 	}
@@ -591,6 +600,23 @@ renderCUDA(
 				// Atomic, since this pixel is just one of potentially
 				// many that were affected by this Gaussian.
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+			}
+
+			// Segmentation's contribution to dL_dalpha — MUST sum into the SAME
+			// scalar used by color (design doc §2). Dropping this silently
+			// decouples L_sem from position/scale/rotation/opacity.
+			if (dL_dpixels_seg)
+			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+			{
+				const float s = seg_features[global_id * NUM_SEG_CHANNELS + ch];
+				// Update last seg (to be used in the next iteration)
+				accum_rec_seg[ch] = last_alpha * last_seg[ch] + (1.f - last_alpha) * accum_rec_seg[ch];
+				last_seg[ch] = s;
+
+				const float dL_dseg_ch = dL_dpixel_seg[ch];
+				dL_dalpha += (s - accum_rec_seg[ch]) * dL_dseg_ch;
+				// Atomic, same pattern as dL_dcolors.
+				atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]), dchannel_dcolor * dL_dseg_ch);
 			}
 			// Propagate gradients from inverse depth to alphaas and
 			// per Gaussian inverse depths
@@ -720,15 +746,18 @@ void BACKWARD::render(
 	const float2* means2D,
 	const float4* conic_opacity,
 	const float* colors,
+	const float* seg_features,
 	const float* depths,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
+	const float* dL_dpixels_seg,
 	const float* dL_invdepths,
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
+	float* dL_dseg_encoding,
 	float* dL_dinvdepths)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
@@ -739,15 +768,18 @@ void BACKWARD::render(
 		means2D,
 		conic_opacity,
 		colors,
+		seg_features,
 		depths,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
+		dL_dpixels_seg,
 		dL_invdepths,
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dopacity,
 		dL_dcolors,
+		dL_dseg_encoding,
 		dL_dinvdepths
 		);
 }
