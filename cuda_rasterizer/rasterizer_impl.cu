@@ -17,8 +17,8 @@
 #include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
+#include <cub/device/device_scan.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
