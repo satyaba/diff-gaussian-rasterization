@@ -159,7 +159,6 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
-	const float* seg_encoding,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const glm::vec3* cam_pos,
@@ -171,7 +170,6 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* depths,
 	float* cov3Ds,
 	float* rgb,
-	float* out_seg_features,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
@@ -256,12 +254,6 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		rgb[idx * C + 2] = result.z;
 	}
 
-	// Raw passthrough: stage the per-Gaussian segmentation encoding for
-	// renderCUDA. Unconditional (not tied to the SH path). No activation
-	// here — the decoder owns the only nonlinearity.
-	for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
-		out_seg_features[idx * NUM_SEG_CHANNELS + ch] = seg_encoding[idx * NUM_SEG_CHANNELS + ch];
-
 	// Store some useful helper data for the next steps.
 	depths[idx] = p_view.z;
 	radii[idx] = my_radius;
@@ -287,7 +279,11 @@ renderCUDA(
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
-	const float* __restrict__ seg_features,
+	// Raw, unstaged input tensor [P, NUM_SEG_CHANNELS] (the nn.Parameter-backed
+	// seg_encoding), read directly via collected_id — no GeometryState staging,
+	// no shared-memory cache (32 channels would cost ~32 KB/block and tank
+	// occupancy; locked decision).
+	const float* __restrict__ seg_encoding,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
@@ -382,11 +378,11 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
-			// Segmentation compositing: same alpha/T weight as color, direct
-			// global read via collected_id (no shared-memory staging — 32
-			// channels would cost ~32 KB/block and tank occupancy).
+			// Segmentation compositing: same alpha/T weight as color, direct global read
+			// of the raw seg_encoding input via collected_id (no shared-memory
+			// staging — 32 channels would cost ~32 KB/block and tank occupancy).
 			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
-				S[ch] += seg_features[collected_id[j] * NUM_SEG_CHANNELS + ch] * alpha * T;
+				S[ch] += seg_encoding[collected_id[j] * NUM_SEG_CHANNELS + ch] * alpha * T;
 
 			if(invdepth)
 			expected_invdepth += (1 / depths[collected_id[j]]) * alpha * T;
@@ -425,7 +421,7 @@ void FORWARD::render(
 	int W, int H,
 	const float2* means2D,
 	const float* colors,
-	const float* seg_features,
+	const float* seg_encoding,
 	const float4* conic_opacity,
 	float* final_T,
 	uint32_t* n_contrib,
@@ -441,7 +437,7 @@ void FORWARD::render(
 		W, H,
 		means2D,
 		colors,
-		seg_features,
+		seg_encoding,
 		conic_opacity,
 		final_T,
 		n_contrib,
@@ -462,7 +458,6 @@ void FORWARD::preprocess(int P, int D, int M,
 	bool* clamped,
 	const float* cov3D_precomp,
 	const float* colors_precomp,
-	const float* seg_encoding,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const glm::vec3* cam_pos,
@@ -474,7 +469,6 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* depths,
 	float* cov3Ds,
 	float* rgb,
-	float* out_seg_features,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
@@ -492,7 +486,6 @@ void FORWARD::preprocess(int P, int D, int M,
 		clamped,
 		cov3D_precomp,
 		colors_precomp,
-		seg_encoding,
 		viewmatrix,
 		projmatrix,
 		cam_pos,
@@ -504,7 +497,6 @@ void FORWARD::preprocess(int P, int D, int M,
 		depths,
 		cov3Ds,
 		rgb,
-		out_seg_features,
 		conic_opacity,
 		grid,
 		tiles_touched,

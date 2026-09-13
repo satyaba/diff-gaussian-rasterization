@@ -459,7 +459,9 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
-	const float* __restrict__ seg_features,
+	// Raw, unstaged input tensor [P, NUM_SEG_CHANNELS] (the nn.Parameter-backed
+	// seg_encoding) — read directly; no GeometryState staging.
+	const float* __restrict__ seg_encoding,
 	const float* __restrict__ depths,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
@@ -608,7 +610,7 @@ renderCUDA(
 			if (dL_dpixels_seg)
 			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 			{
-				const float s = seg_features[global_id * NUM_SEG_CHANNELS + ch];
+				const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
 				// Update last seg (to be used in the next iteration)
 				accum_rec_seg[ch] = last_alpha * last_seg[ch] + (1.f - last_alpha) * accum_rec_seg[ch];
 				last_seg[ch] = s;
@@ -746,7 +748,7 @@ void BACKWARD::render(
 	const float2* means2D,
 	const float4* conic_opacity,
 	const float* colors,
-	const float* seg_features,
+	const float* seg_encoding,
 	const float* depths,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
@@ -768,7 +770,7 @@ void BACKWARD::render(
 		means2D,
 		conic_opacity,
 		colors,
-		seg_features,
+		seg_encoding,
 		depths,
 		final_Ts,
 		n_contrib,
