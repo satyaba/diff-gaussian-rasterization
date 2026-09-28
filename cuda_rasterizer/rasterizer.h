@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -14,6 +14,7 @@
 
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 namespace CudaRasterizer
 {
@@ -34,6 +35,9 @@ namespace CudaRasterizer
 			std::function<char* (size_t)> imageBuffer,
 			const int P, int D, int M,
 			const float* background,
+			const int64_t* gt_segmentation,
+			const int num_segmentation_classes,
+			float* vote_buffer,
 			const int width, int height,
 			const float* means3D,
 			const float* shs,

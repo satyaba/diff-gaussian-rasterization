@@ -35,6 +35,9 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
+	const torch::Tensor& gt_segmentation,
+	const int num_segmentation_classes,
+	const torch::Tensor& vote_buffer,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
     const torch::Tensor& seg_encoding,
@@ -63,6 +66,34 @@ RasterizeGaussiansCUDA(
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
+
+  // Optional per-view ground-truth segmentation [H, W] (int64 class ids, -1 = void).
+  // An empty tensor means "no segmentation for this view": hand the kernel a null
+  // pointer, which the sampling path must treat as "no votes".
+  torch::Tensor gt_seg_contig;
+  const int64_t* gt_seg_ptr = nullptr;
+  if (gt_segmentation.numel() > 0) {
+    TORCH_CHECK(gt_segmentation.scalar_type() == torch::kLong,
+                "gt_segmentation must be int64 (torch.long)");
+    TORCH_CHECK(gt_segmentation.dim() == 2 && gt_segmentation.size(0) == H && gt_segmentation.size(1) == W,
+                "gt_segmentation must have shape [H, W] matching the render target");
+    gt_seg_contig = gt_segmentation.contiguous();
+    gt_seg_ptr = gt_seg_contig.data<int64_t>();
+  }
+
+  // Optional per-Gaussian segmentation vote buffer [P, num_segmentation_classes],
+  // accumulated in-kernel as sum(alpha * T) at [gaussian_id, gt_label]. An empty
+  // tensor disables voting; the kernel only touches it when gt_labels is non-null.
+  torch::Tensor vote_buffer_contig;
+  float* vote_buffer_ptr = nullptr;
+  if (vote_buffer.numel() > 0) {
+    TORCH_CHECK(vote_buffer.dim() == 2 && vote_buffer.size(0) == P && vote_buffer.size(1) == num_segmentation_classes,
+                "vote_buffer must have shape [P, num_segmentation_classes]");
+    TORCH_CHECK(vote_buffer.scalar_type() == torch::kFloat32,
+                "vote_buffer must be float32");
+    vote_buffer_contig = vote_buffer.contiguous();
+    vote_buffer_ptr = vote_buffer_contig.data<float>();
+  }
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
@@ -101,6 +132,9 @@ RasterizeGaussiansCUDA(
 		imgFunc,
 	    P, degree, M,
 		background.contiguous().data<float>(),
+		gt_seg_ptr,
+		num_segmentation_classes,
+		vote_buffer_ptr,
 		W, H,
 		means3D.contiguous().data<float>(),
 		sh.contiguous().data_ptr<float>(),

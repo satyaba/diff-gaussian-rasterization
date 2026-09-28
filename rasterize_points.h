@@ -18,6 +18,9 @@
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
+	const torch::Tensor& gt_segmentation,
+	const int num_segmentation_classes,
+	const torch::Tensor& vote_buffer,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
     const torch::Tensor& seg_encoding,
