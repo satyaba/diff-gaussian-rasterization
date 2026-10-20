@@ -43,6 +43,40 @@ def rasterize_gaussians(
         raster_settings,
     )
 
+def rasterize_histograms(
+    geom_buffer,
+    binning_buffer,
+    img_buffer,
+    num_points,
+    num_rendered,
+    image_height,
+    image_width,
+    error_bins,
+    num_bins,
+    mass_buffer,
+    error_hist,
+):
+    """Accumulate per-Gaussian evidence into mass_buffer [P] and error_hist [P, B].
+
+    Replays the sorted geometry from the forward pass that produced the buffers
+    (no re-render). mass_buffer and error_hist are mutated in place, so both must
+    be contiguous fp32 CUDA tensors. error_bins is an int32 [H, W] map of per-pixel
+    error bin ids. Runs under no autograd; call inside torch.no_grad().
+    """
+    return _C.rasterize_histograms(
+        geom_buffer,
+        binning_buffer,
+        img_buffer,
+        int(num_points),
+        int(num_rendered),
+        int(image_height),
+        int(image_width),
+        error_bins,
+        int(num_bins),
+        mass_buffer,
+        error_hist,
+    )
+
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -94,15 +128,24 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(colors_precomp, seg_encoding, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer)
-        return color, rendered_seg, radii, invdepths
+        # geom/binning/image buffers are exposed as outputs so callers can run a
+        # follow-up histogram pass (RasterizeHistogramsCUDA) that reuses the sorted
+        # geometry without re-rendering. num_rendered is returned as a 1-element
+        # tensor (non-differentiable metadata).
+        num_rendered_t = torch.tensor(num_rendered, dtype=torch.int32)
+        return color, rendered_seg, radii, invdepths, geomBuffer, binningBuffer, imgBuffer, num_rendered_t
 
     @staticmethod
-    def backward(ctx, grad_out_color, grad_out_seg, _, grad_out_depth):
+    def backward(ctx, *grad_outputs):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         colors_precomp, seg_encoding, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+
+        # Forward outputs: (color, rendered_seg, radii, invdepths, geom, binning,
+        # img, num_rendered); only color/seg/invdepths are differentiable.
+        grad_out_color, grad_out_seg, grad_out_depth = grad_outputs[0], grad_outputs[1], grad_outputs[3]
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,

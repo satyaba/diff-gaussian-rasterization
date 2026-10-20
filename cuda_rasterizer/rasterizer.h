@@ -97,6 +97,21 @@ namespace CudaRasterizer
 			float* dL_drot,
 			bool antialiasing,
 			bool debug);
+
+		// Histogram accumulation over the geometry/binning/image state produced by
+		// a prior forward call. Reuses the already-sorted Gaussian order, so no
+		// preprocessing or sorting is repeated.
+		static void histograms(
+			char* geom_buffer,
+			char* binning_buffer,
+			char* image_buffer,
+			const int P, const int R,
+			const int width, const int height,
+			const int32_t* error_bins,
+			const int num_bins,
+			float* mass_buffer,
+			float* error_buffer,
+			bool debug);
 	};
 };
 

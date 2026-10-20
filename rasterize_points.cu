@@ -161,6 +161,56 @@ RasterizeGaussiansCUDA(
   return std::make_tuple(rendered, out_color, out_seg, radii, geomBuffer, binningBuffer, imgBuffer, out_invdepth);
 }
 
+// Histogram accumulation over a prior forward pass. The geom/binning/image
+// buffers returned by RasterizeGaussiansCUDA are replayed; mass_buffer [P] and
+// error_buffer [P, num_bins] are accumulated IN PLACE, so they must be given
+// contiguous (they are freshly torch.zeros-allocated by the caller).
+void RasterizeHistogramsCUDA(
+	const torch::Tensor& geomBuffer,
+	const torch::Tensor& binningBuffer,
+	const torch::Tensor& imageBuffer,
+	const int P,
+	const int R,
+	const int image_height,
+	const int image_width,
+	const torch::Tensor& error_bins,
+	const int num_bins,
+	const torch::Tensor& mass_buffer,
+	const torch::Tensor& error_buffer)
+{
+  const int H = image_height;
+  const int W = image_width;
+
+  TORCH_CHECK(error_bins.scalar_type() == torch::kInt32,
+              "error_bins must be int32 (torch.int32)");
+  TORCH_CHECK(error_bins.dim() == 2 && error_bins.size(0) == H && error_bins.size(1) == W,
+              "error_bins must have shape [H, W] matching the render target");
+  TORCH_CHECK(mass_buffer.scalar_type() == torch::kFloat32 && mass_buffer.numel() == P,
+              "mass_buffer must be float32 with P elements");
+  TORCH_CHECK(error_buffer.scalar_type() == torch::kFloat32 && error_buffer.numel() == (int64_t)P * num_bins,
+              "error_buffer must be float32 with P * num_bins elements");
+  TORCH_CHECK(mass_buffer.is_contiguous() && error_buffer.is_contiguous(),
+              "mass_buffer and error_buffer must be contiguous (accumulated in place)");
+  TORCH_CHECK(geomBuffer.is_contiguous() && binningBuffer.is_contiguous() && imageBuffer.is_contiguous(),
+              "geometry/binning/image buffers must be contiguous");
+
+  if (P == 0 || R == 0)
+    return;
+
+  torch::Tensor error_bins_contig = error_bins.contiguous();
+
+  CudaRasterizer::Rasterizer::histograms(
+    reinterpret_cast<char*>(geomBuffer.data_ptr()),
+    reinterpret_cast<char*>(binningBuffer.data_ptr()),
+    reinterpret_cast<char*>(imageBuffer.data_ptr()),
+    P, R, W, H,
+    error_bins_contig.data<int32_t>(),
+    num_bins,
+    mass_buffer.data<float>(),
+    error_buffer.data<float>(),
+    false);
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
  	const torch::Tensor& background,

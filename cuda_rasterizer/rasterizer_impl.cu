@@ -350,6 +350,42 @@ int CudaRasterizer::Rasterizer::forward(
 	return num_rendered;
 }
 
+// Histogram accumulation pass. Reconstructs the geometry/binning/image state
+// from the buffers saved by a prior forward call (same layout backward uses)
+// and replays the sorted Gaussian list to accumulate alpha*T evidence. No
+// gradients; the buffers are raw byte chunks that must match the forward P/R.
+void CudaRasterizer::Rasterizer::histograms(
+	char* geom_buffer,
+	char* binning_buffer,
+	char* image_buffer,
+	const int P, const int R,
+	const int width, const int height,
+	const int32_t* error_bins,
+	const int num_bins,
+	float* mass_buffer,
+	float* error_buffer,
+	bool debug)
+{
+	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+	ImageState imgState = ImageState::fromChunk(image_buffer, width * height);
+
+	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	CHECK_CUDA(FORWARD::histogram(
+		tile_grid, block,
+		imgState.ranges,
+		binningState.point_list,
+		width, height,
+		geomState.means2D,
+		geomState.conic_opacity,
+		error_bins,
+		num_bins,
+		mass_buffer,
+		error_buffer), debug)
+}
+
 // Produce necessary gradients for optimization, corresponding
 // to forward render pass
 void CudaRasterizer::Rasterizer::backward(

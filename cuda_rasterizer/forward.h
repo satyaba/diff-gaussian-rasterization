@@ -69,6 +69,23 @@ namespace FORWARD
 		float* out_seg,
 		float* depths,
 		float* depth);
+
+	// Histogram accumulation pass. Re-walks the sorted tile ranges produced by a
+	// prior forward pass (same point_list / ranges / means2D / conic_opacity), so
+	// the alpha/T trajectory it replays is identical to the colour pass. For every
+	// contributing Gaussian it accumulates alpha*T into a [P] mass buffer and into
+	// a [P, num_bins] histogram at the bin of the pixel's per-pixel error.
+	void histogram(
+		const dim3 grid, dim3 block,
+		const uint2* ranges,
+		const uint32_t* point_list,
+		int W, int H,
+		const float2* points_xy_image,
+		const float4* conic_opacity,
+		const int32_t* error_bins,
+		const int num_bins,
+		float* mass_buffer,
+		float* error_buffer);
 }
 
 

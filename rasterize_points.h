@@ -71,6 +71,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const bool antialiasing,
 	const bool debug);
 
+void RasterizeHistogramsCUDA(
+	const torch::Tensor& geomBuffer,
+	const torch::Tensor& binningBuffer,
+	const torch::Tensor& imageBuffer,
+	const int P,
+	const int R,
+	const int image_height,
+	const int image_width,
+	const torch::Tensor& error_bins,
+	const int num_bins,
+	const torch::Tensor& mass_buffer,
+	const torch::Tensor& error_buffer);
+
 torch::Tensor markVisible(
 		torch::Tensor& means3D,
 		torch::Tensor& viewmatrix,

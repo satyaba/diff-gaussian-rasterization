@@ -466,6 +466,139 @@ void FORWARD::render(
 		depth);
 }
 
+// Histogram accumulation method. Shares the tile/block layout and inner blend
+// loop with renderCUDA, but replays only the conic/opacity state to attribute
+// per-pixel evidence to Gaussians:
+//   mass_buffer[g]        += alpha * T
+//   error_buffer[g*B+bin] += alpha * T
+// where bin is error_bins[pixel] (per-pixel L1 error quantized in Python). No
+// colours, segmentation or depth are read, and no gradients are produced.
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+histogramCUDA(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float2* __restrict__ points_xy_image,
+	const float4* __restrict__ conic_opacity,
+	const int32_t* __restrict__ error_bins,
+	const int num_bins,
+	float* __restrict__ mass_buffer,
+	float* __restrict__ error_buffer)
+{
+	// Identify current tile and associated min/max pixel range.
+	auto block = cg::this_thread_block();
+	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	uint32_t pix_id = W * pix.y + pix.x;
+	float2 pixf = { (float)pix.x, (float)pix.y };
+
+	// Check if this thread is associated with a valid pixel or outside.
+	bool inside = pix.x < W&& pix.y < H;
+	bool done = !inside;
+
+	// Load start/end range of IDs to process in bit sorted list.
+	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	int toDo = range.y - range.x;
+
+	// Allocate storage for batches of collectively fetched data.
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+
+	// The error bin is constant across this pixel's Gaussian loop; clamp it into
+	// range once so a stray label can never index out of bounds.
+	int bin = 0;
+	if (inside && error_bins != nullptr)
+	{
+		bin = (int)error_bins[pix_id];
+		if (bin < 0)
+			bin = 0;
+		else if (bin >= num_bins)
+			bin = num_bins - 1;
+	}
+
+	// Initialize helper variables
+	float T = 1.0f;
+
+	// Iterate over batches until all done or range is complete
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		// End if entire block votes that it is done rasterizing
+		int num_done = __syncthreads_count(done);
+		if (num_done == BLOCK_SIZE)
+			break;
+
+		// Collectively fetch per-Gaussian data from global to shared
+		int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y)
+		{
+			int coll_id = point_list[range.x + progress];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+		}
+		block.sync();
+
+		// Iterate over current batch
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		{
+			// Resample using conic matrix (cf. "Surface
+			// Splatting" by Zwicker et al., 2001)
+			float2 xy = collected_xy[j];
+			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			float4 con_o = collected_conic_opacity[j];
+			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			if (power > 0.0f)
+				continue;
+
+			// Eq. (2) from 3D Gaussian splatting paper: alpha and falloff.
+			float alpha = min(0.99f, con_o.w * exp(power));
+			if (alpha < 1.0f / 255.0f)
+				continue;
+			float test_T = T * (1 - alpha);
+			if (test_T < 0.0001f)
+			{
+				done = true;
+				continue;
+			}
+
+			const int coll_id = collected_id[j];
+			const float w = alpha * T;
+			atomicAdd(&mass_buffer[coll_id], w);
+			if (error_buffer != nullptr && error_bins != nullptr)
+				atomicAdd(&error_buffer[(int64_t)coll_id * num_bins + bin], w);
+
+			T = test_T;
+		}
+	}
+}
+
+void FORWARD::histogram(
+	const dim3 grid, dim3 block,
+	const uint2* ranges,
+	const uint32_t* point_list,
+	int W, int H,
+	const float2* means2D,
+	const float4* conic_opacity,
+	const int32_t* error_bins,
+	const int num_bins,
+	float* mass_buffer,
+	float* error_buffer)
+{
+	histogramCUDA << <grid, block >> > (
+		ranges,
+		point_list,
+		W, H,
+		means2D,
+		conic_opacity,
+		error_bins,
+		num_bins,
+		mass_buffer,
+		error_buffer);
+}
+
 void FORWARD::preprocess(int P, int D, int M,
 	const float* means3D,
 	const glm::vec3* scales,
