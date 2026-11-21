@@ -37,6 +37,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& gt_segmentation,
 	const int num_segmentation_classes,
+	const bool do_seg,
 	const torch::Tensor& vote_buffer,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
@@ -134,6 +135,7 @@ RasterizeGaussiansCUDA(
 		background.contiguous().data<float>(),
 		gt_seg_ptr,
 		num_segmentation_classes,
+		do_seg,
 		vote_buffer_ptr,
 		W, H,
 		means3D.contiguous().data<float>(),
@@ -180,6 +182,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     const torch::Tensor& dL_dout_color,
 	const torch::Tensor& dL_dout_invdepth,
 	const torch::Tensor& dL_dout_seg,
+	const torch::Tensor& dL_dmean2D_photo,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
@@ -222,6 +225,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	dL_dout_invdepthptr = dL_dout_invdepth.data<float>();
   }
 
+  // Optional photometric-only 2D-mean gradient buffer [P, 3] (sgdense decoupled
+  // densification trigger). Written in place by the kernel; empty tensor => the
+  // kernel receives a null pointer and skips it.
+  float* dL_dmean2D_photoptr = nullptr;
+  if (dL_dmean2D_photo.numel() > 0) {
+    TORCH_CHECK(dL_dmean2D_photo.scalar_type() == torch::kFloat32,
+                "dL_dmean2D_photo must be float32");
+    TORCH_CHECK(dL_dmean2D_photo.dim() == 2 && dL_dmean2D_photo.size(0) == P && dL_dmean2D_photo.size(1) == 3,
+                "dL_dmean2D_photo must have shape [P, 3]");
+    TORCH_CHECK(dL_dmean2D_photo.is_contiguous(),
+                "dL_dmean2D_photo must be contiguous");
+    dL_dmean2D_photoptr = dL_dmean2D_photo.data_ptr<float>();
+  }
+
   if(P != 0)
   {
 	  CudaRasterizer::Rasterizer::backward(P, degree, M, R,
@@ -249,6 +266,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dout_seg.contiguous().data<float>(),
 	  dL_dout_invdepthptr,
 	  dL_dmeans2D.contiguous().data<float>(),
+	  dL_dmean2D_photoptr,
 	  dL_dconic.contiguous().data<float>(),
 	  dL_dopacity.contiguous().data<float>(),
 	  dL_dcolors.contiguous().data<float>(),

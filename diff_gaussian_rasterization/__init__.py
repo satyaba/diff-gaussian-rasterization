@@ -64,6 +64,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.bg,
             raster_settings.gt_segmentation,
             raster_settings.num_segmentation_classes,
+            raster_settings.do_seg,
             raster_settings.vote_buffer,
             means3D,
             colors_precomp,
@@ -122,6 +123,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 grad_out_color,
                 grad_out_depth,
                 grad_out_seg,
+                raster_settings.dL_dmean2D_photo,
                 sh,
                 raster_settings.sh_degree,
                 raster_settings.campos,
@@ -158,6 +160,9 @@ class GaussianRasterizationSettings(NamedTuple):
     bg : torch.Tensor
     gt_segmentation : torch.Tensor
     num_segmentation_classes : int
+    # Runtime gate for the seg compositing pass (seg-render interval). False =>
+    # the kernel skips votes/compositing/out_seg, so the iteration costs ~vanilla.
+    do_seg : bool
     vote_buffer : torch.Tensor
     scale_modifier : float
     viewmatrix : torch.Tensor
@@ -167,6 +172,10 @@ class GaussianRasterizationSettings(NamedTuple):
     prefiltered : bool
     debug : bool
     antialiasing : bool
+    # Photometric-only 2D-mean gradient buffer [P, 3], written in place by the
+    # backward pass. Used by SGDense's decoupled densification trigger
+    # (--densify_photo_grad_only) so no second autograd pass is needed.
+    dL_dmean2D_photo : torch.Tensor
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):

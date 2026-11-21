@@ -292,6 +292,11 @@ renderCUDA(
 	// segmentation-guided density-control pass (consumer not implemented yet).
 	const int64_t* __restrict__ gt_labels,
 	const int num_segmentation_classes,
+	// Runtime gate for the seg compositing pass. When false the kernel skips the
+	// vote atomic, the 32-channel S accumulation and the out_seg write — used by
+	// SGDense's seg-render interval (--seg_render_interval K): seg is only rendered
+	// on active iterations, so the rest cost ~vanilla.
+	const bool do_seg,
 	float* __restrict__ vote_buffer,
 	float* __restrict__ out_color,
 	float* __restrict__ out_seg,
@@ -379,7 +384,7 @@ renderCUDA(
 				continue;
 			}
 
-			if (gt_labels != nullptr && vote_buffer != nullptr)
+			if (do_seg && gt_labels != nullptr && vote_buffer != nullptr)
 			{
 			    int64_t gt_label = gt_labels[pix_id];
 				if (gt_label >= 0 && gt_label < num_segmentation_classes)                          // -1 == void → abstain, cast no vote
@@ -393,6 +398,8 @@ renderCUDA(
 			// Segmentation compositing: same alpha/T weight as color, direct global read
 			// of the raw seg_encoding input via collected_id (no shared-memory
 			// staging — 32 channels would cost ~32 KB/block and tank occupancy).
+			// Skipped entirely when do_seg is false (seg-render interval).
+			if (do_seg)
 			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 				S[ch] += seg_encoding[collected_id[j] * NUM_SEG_CHANNELS + ch] * alpha * T;
 
@@ -417,7 +424,8 @@ renderCUDA(
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 
 		// No background term for segmentation: unfilled space decodes to
-		// near-zero encoding.
+		// near-zero encoding. Skipped when do_seg is false.
+		if (do_seg)
 		for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 			out_seg[ch * H * W + pix_id] = S[ch];
 
@@ -440,6 +448,7 @@ void FORWARD::render(
 	const float* bg_color,
 	const int64_t* gt_labels,
 	const int num_segmentation_classes,
+	const bool do_seg,
 	float* vote_buffer,
 	float* out_color,
 	float* out_seg,
@@ -459,6 +468,7 @@ void FORWARD::render(
 		bg_color,
 		gt_labels,
 		num_segmentation_classes,
+		do_seg,
 		vote_buffer,
 		out_color,
 		out_seg,
