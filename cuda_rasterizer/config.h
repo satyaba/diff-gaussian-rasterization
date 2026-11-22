@@ -14,6 +14,10 @@
 
 #define NUM_CHANNELS 3 // Default 3, RGB
 #define NUM_SEG_CHANNELS 32 // Per-Gaussian segmentation encoding dimensionality (locked; changing requires a rebuild)
+// Compute the in-kernel photometric-only 2D-mean gradient (dL_dmean2D_photo) that
+// drives SGDense's decoupled densification trigger. Set to 0 to build the backward
+// WITHOUT it (diagnostic only: the trigger then reads zeros, so densification is off).
+#define SEG_PHOTO_GRAD 1
 #define BLOCK_X 16
 #define BLOCK_Y 16
 

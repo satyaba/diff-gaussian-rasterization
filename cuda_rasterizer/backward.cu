@@ -596,7 +596,9 @@ renderCUDA(
 			// Photometric(+depth) contribution to dL_dalpha, EXCLUDING seg. Accumulated
 			// so this single backward can also emit the decoupled densification-trigger
 			// gradient (dL_dmean2D_photo) with no second autograd pass.
+#if SEG_PHOTO_GRAD
 			float dL_dalpha_photo = 0.0f;
+#endif
 			const int global_id = collected_id[j];
 			for (int ch = 0; ch < C; ch++)
 			{
@@ -607,7 +609,9 @@ renderCUDA(
 
 				const float dL_dchannel = dL_dpixel[ch];
 				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+#if SEG_PHOTO_GRAD
 				dL_dalpha_photo += (c - accum_rec[ch]) * dL_dchannel;
+#endif
 				// Update the gradients w.r.t. color of the Gaussian. 
 				// Atomic, since this pixel is just one of potentially
 				// many that were affected by this Gaussian.
@@ -645,12 +649,16 @@ renderCUDA(
 			accum_invdepth_rec = last_alpha * last_invdepth + (1.f - last_alpha) * accum_invdepth_rec;
 			last_invdepth = invd;
 			dL_dalpha += (invd - accum_invdepth_rec) * dL_invdepth;
+#if SEG_PHOTO_GRAD
 			dL_dalpha_photo += (invd - accum_invdepth_rec) * dL_invdepth;
+#endif
 			atomicAdd(&(dL_dinvdepths[global_id]), dchannel_dcolor * dL_invdepth);
 			}
 
 			dL_dalpha *= T;
+#if SEG_PHOTO_GRAD
 			dL_dalpha_photo *= T;
+#endif
 			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
 
@@ -661,12 +669,16 @@ renderCUDA(
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
 			const float bg_term = (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 			dL_dalpha += bg_term;
+#if SEG_PHOTO_GRAD
 			dL_dalpha_photo += bg_term;
+#endif
 
 
 			// Helpful reusable temporary variables
 			const float dL_dG = con_o.w * dL_dalpha;
+#if SEG_PHOTO_GRAD
 			const float dL_dG_photo = con_o.w * dL_dalpha_photo;
+#endif
 			const float gdx = G * d.x;
 			const float gdy = G * d.y;
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
@@ -678,11 +690,13 @@ renderCUDA(
 
 			// Photometric-only 2D-mean gradient for the decoupled densification
 			// trigger (--densify_photo_grad_only): same path, seg-excluded dL_dalpha.
+#if SEG_PHOTO_GRAD
 			if (dL_dmean2D_photo != nullptr)
 			{
 				atomicAdd(&dL_dmean2D_photo[global_id].x, dL_dG_photo * dG_ddelx * ddelx_dx);
 				atomicAdd(&dL_dmean2D_photo[global_id].y, dL_dG_photo * dG_ddely * ddely_dy);
 			}
+#endif
 
 			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
