@@ -448,36 +448,6 @@ __global__ void preprocessCUDA(
 		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
 }
 
-// Segmentation backward step, isolated in its own no-inline device function so its
-// 32-iteration unrolled loop (global reads + atomics) cannot perturb the register
-// allocation / scheduling of the main renderCUDA loop. Inlining it back is what
-// produced a ~5x backward slowdown even when the branch is skipped.
-#if SEG_BACKWARD
-__device__ __noinline__ void segBackwardStep(
-	const float* __restrict__ seg_encoding,
-	const float* __restrict__ dL_pixels_seg,
-	float* __restrict__ dL_dseg_encoding,
-	const int H, const int W, const int pix_id, const int global_id,
-	const float dchannel_dcolor, const float last_alpha,
-	float& accum_rec_seg_s, float& last_seg_s, float& dL_dalpha)
-{
-	float B_cur = 0.0f;
-#pragma unroll 1
-	for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
-	{
-		const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
-		const float dL_dseg_ch = dL_pixels_seg[ch * H * W + pix_id];
-		B_cur += dL_dseg_ch * s;
-		atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]),
-		          dchannel_dcolor * dL_dseg_ch);
-	}
-	const float A_new = last_alpha * last_seg_s + (1.f - last_alpha) * accum_rec_seg_s;
-	dL_dalpha += B_cur - A_new;
-	accum_rec_seg_s = A_new;
-	last_seg_s = B_cur;
-}
-#endif
-
 // Backward version of the rendering procedure.
 template <uint32_t C>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
@@ -655,13 +625,25 @@ renderCUDA(
 			// decouples L_sem from position/scale/rotation/opacity.
 			// Reduced to two scalars (algebraically identical): B is the seg encoding
 			// contribution at this Gaussian and A carries the alpha-weighted history.
-			// Delegated to a __noinline__ function so its codegen cannot perturb this
-			// hot loop (see segBackwardStep above).
+			// `#pragma unroll 1` keeps the 32-iteration loop from being fully unrolled,
+			// which raised the whole kernel's register pressure and ~5x'd the backward.
 #if SEG_BACKWARD
 			if (dL_dpixels_seg)
-				segBackwardStep(seg_encoding, dL_dpixels_seg, dL_dseg_encoding,
-				                H, W, (int)pix_id, global_id, dchannel_dcolor,
-				                last_alpha, accum_rec_seg_s, last_seg_s, dL_dalpha);
+			{
+				float B_cur = 0.0f;
+#pragma unroll 1
+				for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+				{
+					const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
+					const float dL_dseg_ch = dL_pixels_seg[ch * H * W + pix_id];
+					B_cur += dL_dseg_ch * s;
+					atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]), dchannel_dcolor * dL_dseg_ch);
+				}
+				const float A_new = last_alpha * last_seg_s + (1.f - last_alpha) * accum_rec_seg_s;
+				dL_dalpha += B_cur - A_new;
+				accum_rec_seg_s = A_new;
+				last_seg_s = B_cur;
+			}
 #endif
 			// Propagate gradients from inverse depth to alphaas and
 			// per Gaussian inverse depths
