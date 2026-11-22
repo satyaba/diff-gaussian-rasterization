@@ -635,7 +635,7 @@ renderCUDA(
 				for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 				{
 					const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
-					const float dL_dseg_ch = dL_pixels_seg[ch * H * W + pix_id];
+					const float dL_dseg_ch = dL_dpixels_seg[ch * H * W + pix_id];
 					B_cur += dL_dseg_ch * s;
 					atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]), dchannel_dcolor * dL_dseg_ch);
 				}
