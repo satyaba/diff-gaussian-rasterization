@@ -18,6 +18,10 @@
 // drives SGDense's decoupled densification trigger. Set to 0 to build the backward
 // WITHOUT it (diagnostic only: the trigger then reads zeros, so densification is off).
 #define SEG_PHOTO_GRAD 1
+// Compile the per-pixel segmentation encoding gradient + its dL_dalpha contribution
+// into the backward kernel. Set to 0 to bisect the renderCUDA backward slowdown
+// (diagnostic only: segmentation backward is then disabled).
+#define SEG_BACKWARD 1
 #define BLOCK_X 16
 #define BLOCK_Y 16
 

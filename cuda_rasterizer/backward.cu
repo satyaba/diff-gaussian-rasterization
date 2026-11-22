@@ -521,8 +521,10 @@ renderCUDA(
 	// B = sum_ch a[ch]*s[ch]. Tracking A and B (and reading a[ch] = dL_dpixels_seg
 	// from global inside the loop instead of caching all 32 in registers) keeps this
 	// kernel at the same register/occupancy class as the stock backward.
+#if SEG_BACKWARD
 	float accum_rec_seg_s = 0.0f;
 	float last_seg_s = 0.0f;
+#endif
 	float dL_invdepth;
 	float accum_invdepth_rec = 0;
 	if (inside)
@@ -623,6 +625,7 @@ renderCUDA(
 			// decouples L_sem from position/scale/rotation/opacity.
 			// Reduced to two scalars (algebraically identical): B is the seg encoding
 			// contribution at this Gaussian and A carries the alpha-weighted history.
+#if SEG_BACKWARD
 			if (dL_dpixels_seg)
 			{
 				float B_cur = 0.0f;
@@ -641,6 +644,7 @@ renderCUDA(
 				accum_rec_seg_s = A_new;
 				last_seg_s = B_cur;
 			}
+#endif
 			// Propagate gradients from inverse depth to alphaas and
 			// per Gaussian inverse depths
 			if (dL_dinvdepths)
