@@ -857,6 +857,7 @@ renderSegCUDA(
 			const int global_id = collected_id[j];
 
 			float B_cur = 0.0f;
+#pragma unroll 1
 			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 			{
 				const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
