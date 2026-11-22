@@ -450,7 +450,7 @@ __global__ void preprocessCUDA(
 
 // Backward version of the rendering procedure.
 template <uint32_t C>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y, 4)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -516,24 +516,19 @@ renderCUDA(
 
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
-	// Segmentation dL_dalpha path. The per-channel recurrences
-	//   accum_rec_seg[ch] = last_alpha*last_seg[ch] + (1-last_alpha)*accum_rec_seg[ch]
-	// feed dL_dalpha only through the scalar dot products
-	//   A = sum_ch a[ch]*accum_rec_seg[ch],  B = sum_ch a[ch]*s[ch]   (a[ch]=dL_dpixel_seg[ch]).
-	// Tracking A and B removes two 32-float register arrays from this hot kernel
-	// (register pressure / occupancy), while dL_dpixel_seg stays for the encoding grad.
+	// Segmentation dL_dalpha path. The per-channel recurrences feed dL_dalpha only
+	// through scalar dot products A = sum_ch a[ch]*accum_rec_seg[ch],
+	// B = sum_ch a[ch]*s[ch]. Tracking A and B (and reading a[ch] = dL_dpixels_seg
+	// from global inside the loop instead of caching all 32 in registers) keeps this
+	// kernel at the same register/occupancy class as the stock backward.
 	float accum_rec_seg_s = 0.0f;
 	float last_seg_s = 0.0f;
-	float dL_dpixel_seg[NUM_SEG_CHANNELS] = { 0 };
 	float dL_invdepth;
 	float accum_invdepth_rec = 0;
 	if (inside)
 	{
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
-		if (dL_dpixels_seg)
-			for (int i = 0; i < NUM_SEG_CHANNELS; i++)
-				dL_dpixel_seg[i] = dL_dpixels_seg[i * H * W + pix_id];
 		if(dL_invdepths)
 		dL_invdepth = dL_invdepths[pix_id];
 	}
@@ -630,7 +625,9 @@ renderCUDA(
 				for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
 				{
 					const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
-					const float dL_dseg_ch = dL_dpixel_seg[ch];
+					// a[ch] read from global (per-pixel constant, L1-cached) instead of
+					// a 32-register cache; same value as before.
+					const float dL_dseg_ch = dL_dpixels_seg[ch * H * W + pix_id];
 					B_cur += dL_dseg_ch * s;
 					// Atomic, same pattern as dL_dcolors.
 					atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]), dchannel_dcolor * dL_dseg_ch);
