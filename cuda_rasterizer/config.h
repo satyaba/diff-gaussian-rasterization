@@ -13,7 +13,15 @@
 #define CUDA_RASTERIZER_CONFIG_H_INCLUDED
 
 #define NUM_CHANNELS 3 // Default 3, RGB
-#define NUM_SEG_CHANNELS 32 // Per-Gaussian segmentation encoding dimensionality (locked; changing requires a rebuild)
+#define NUM_SEG_CHANNELS 16 // Per-Gaussian segmentation encoding dimensionality (changing requires a rebuild; must match seg_encoding_dim)
+// Compute the in-kernel photometric-only 2D-mean gradient (dL_dmean2D_photo) that
+// drives SGDense's decoupled densification trigger. Set to 0 to build the backward
+// WITHOUT it (diagnostic only: the trigger then reads zeros, so densification is off).
+#define SEG_PHOTO_GRAD 1
+// Compile the per-pixel segmentation encoding gradient + its dL_dalpha contribution
+// into the backward kernel. Set to 0 to bisect the renderCUDA backward slowdown
+// (diagnostic only: segmentation backward is then disabled).
+#define SEG_BACKWARD 1
 #define BLOCK_X 16
 #define BLOCK_Y 16
 

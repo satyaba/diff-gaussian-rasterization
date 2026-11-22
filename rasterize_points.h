@@ -20,6 +20,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& gt_segmentation,
 	const int num_segmentation_classes,
+	const bool do_seg,
 	const torch::Tensor& vote_buffer,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
@@ -61,6 +62,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     const torch::Tensor& dL_dout_color,
 	const torch::Tensor& dL_dout_invdepth,
 	const torch::Tensor& dL_dout_seg,
+	// Optional photometric-only 2D-mean gradient buffer [P, 3], written in place by
+	// the same backward pass (sgdense decoupled densification trigger). Empty =>
+	// skipped.
+	const torch::Tensor& dL_dmean2D_photo,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,

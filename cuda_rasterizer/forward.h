@@ -64,6 +64,7 @@ namespace FORWARD
 		const float* bg_color,
 		const int64_t* gt_labels,
 		const int num_segmentation_classes,
+		const bool do_seg,
 		float* vote_buffer,
 		float* out_color,
 		float* out_seg,

@@ -469,6 +469,10 @@ renderCUDA(
 	const float* __restrict__ dL_dpixels_seg,
 	const float* __restrict__ dL_invdepths,
 	float3* __restrict__ dL_dmean2D,
+	// Photometric-only 2D-mean gradient for the decoupled densification trigger
+	// (sgdense --densify_photo_grad_only). nullptr when not requested; written by
+	// this same backward pass, so no second autograd traversal is needed.
+	float3* __restrict__ dL_dmean2D_photo,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
@@ -512,18 +516,17 @@ renderCUDA(
 
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
-	float accum_rec_seg[NUM_SEG_CHANNELS] = { 0 };
-	float last_seg[NUM_SEG_CHANNELS] = { 0 };
-	float dL_dpixel_seg[NUM_SEG_CHANNELS] = { 0 };
+	// Segmentation dL_dalpha path. The per-channel recurrences feed dL_dalpha only
+	// through scalar dot products A = sum_ch a[ch]*accum_rec_seg[ch],
+	// B = sum_ch a[ch]*s[ch]. Tracking A and B (and reading a[ch] = dL_dpixels_seg
+	// from global inside the loop instead of caching all 32 in registers) keeps this
+	// kernel at the same register/occupancy class as the stock backward.
 	float dL_invdepth;
 	float accum_invdepth_rec = 0;
 	if (inside)
 	{
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
-		if (dL_dpixels_seg)
-			for (int i = 0; i < NUM_SEG_CHANNELS; i++)
-				dL_dpixel_seg[i] = dL_dpixels_seg[i * H * W + pix_id];
 		if(dL_invdepths)
 		dL_invdepth = dL_invdepths[pix_id];
 	}
@@ -588,6 +591,12 @@ renderCUDA(
 			// gradients w.r.t. alpha (blending factor for a Gaussian/pixel
 			// pair).
 			float dL_dalpha = 0.0f;
+			// Photometric(+depth) contribution to dL_dalpha, EXCLUDING seg. Accumulated
+			// so this single backward can also emit the decoupled densification-trigger
+			// gradient (dL_dmean2D_photo) with no second autograd pass.
+#if SEG_PHOTO_GRAD
+			float dL_dalpha_photo = 0.0f;
+#endif
 			const int global_id = collected_id[j];
 			for (int ch = 0; ch < C; ch++)
 			{
@@ -598,6 +607,9 @@ renderCUDA(
 
 				const float dL_dchannel = dL_dpixel[ch];
 				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+#if SEG_PHOTO_GRAD
+				dL_dalpha_photo += (c - accum_rec[ch]) * dL_dchannel;
+#endif
 				// Update the gradients w.r.t. color of the Gaussian. 
 				// Atomic, since this pixel is just one of potentially
 				// many that were affected by this Gaussian.
@@ -607,19 +619,14 @@ renderCUDA(
 			// Segmentation's contribution to dL_dalpha — MUST sum into the SAME
 			// scalar used by color (design doc §2). Dropping this silently
 			// decouples L_sem from position/scale/rotation/opacity.
-			if (dL_dpixels_seg)
-			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
-			{
-				const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
-				// Update last seg (to be used in the next iteration)
-				accum_rec_seg[ch] = last_alpha * last_seg[ch] + (1.f - last_alpha) * accum_rec_seg[ch];
-				last_seg[ch] = s;
-
-				const float dL_dseg_ch = dL_dpixel_seg[ch];
-				dL_dalpha += (s - accum_rec_seg[ch]) * dL_dseg_ch;
-				// Atomic, same pattern as dL_dcolors.
-				atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]), dchannel_dcolor * dL_dseg_ch);
-			}
+			// Reduced to two scalars (algebraically identical): B is the seg encoding
+			// contribution at this Gaussian and A carries the alpha-weighted history.
+			// `#pragma unroll 1` keeps the 32-iteration loop from being fully unrolled,
+			// which raised the whole kernel's register pressure and ~5x'd the backward.
+			// The segmentation backward (dL_dseg_encoding + its dL_dalpha geometry
+			// share) is computed in the separate renderSegCUDA pass below, keeping this
+			// hot kernel free of segmentation code (which deoptimized its register
+			// allocation ~5x even when the branch was never taken).
 			// Propagate gradients from inverse depth to alphaas and
 			// per Gaussian inverse depths
 			if (dL_dinvdepths)
@@ -628,10 +635,16 @@ renderCUDA(
 			accum_invdepth_rec = last_alpha * last_invdepth + (1.f - last_alpha) * accum_invdepth_rec;
 			last_invdepth = invd;
 			dL_dalpha += (invd - accum_invdepth_rec) * dL_invdepth;
+#if SEG_PHOTO_GRAD
+			dL_dalpha_photo += (invd - accum_invdepth_rec) * dL_invdepth;
+#endif
 			atomicAdd(&(dL_dinvdepths[global_id]), dchannel_dcolor * dL_invdepth);
 			}
 
 			dL_dalpha *= T;
+#if SEG_PHOTO_GRAD
+			dL_dalpha_photo *= T;
+#endif
 			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
 
@@ -640,11 +653,18 @@ renderCUDA(
 			float bg_dot_dpixel = 0;
 			for (int i = 0; i < C; i++)
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
-			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
+			const float bg_term = (-T_final / (1.f - alpha)) * bg_dot_dpixel;
+			dL_dalpha += bg_term;
+#if SEG_PHOTO_GRAD
+			dL_dalpha_photo += bg_term;
+#endif
 
 
 			// Helpful reusable temporary variables
 			const float dL_dG = con_o.w * dL_dalpha;
+#if SEG_PHOTO_GRAD
+			const float dL_dG_photo = con_o.w * dL_dalpha_photo;
+#endif
 			const float gdx = G * d.x;
 			const float gdy = G * d.y;
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
@@ -653,6 +673,16 @@ renderCUDA(
 			// Update gradients w.r.t. 2D mean position of the Gaussian
 			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
 			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+
+			// Photometric-only 2D-mean gradient for the decoupled densification
+			// trigger (--densify_photo_grad_only): same path, seg-excluded dL_dalpha.
+#if SEG_PHOTO_GRAD
+			if (dL_dmean2D_photo != nullptr)
+			{
+				atomicAdd(&dL_dmean2D_photo[global_id].x, dL_dG_photo * dG_ddelx * ddelx_dx);
+				atomicAdd(&dL_dmean2D_photo[global_id].y, dL_dG_photo * dG_ddely * ddely_dy);
+			}
+#endif
 
 			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
@@ -739,6 +769,124 @@ void BACKWARD::preprocess(
 		dL_dopacity);
 }
 
+// Segmentation-only backward pass. Computes, per (Gaussian, pixel) pair:
+//   * dL_dseg_encoding[g,ch] += dchannel_dcolor * a[ch]           (a = dL_pixels_seg)
+//   * the segmentation share of dL_dalpha (reduced to scalars A/B), which drives the
+//     geometry gradients (mean / conic / opacity) atomically into the SAME buffers the
+//     main backward writes.
+// Kept out of renderCUDA so the segmentation code cannot perturb that kernel's
+// register allocation (verified: ~5x backward slowdown when inlined).
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderSegCUDA(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ seg_encoding,
+	const float4* __restrict__ conic_opacity,
+	const float* __restrict__ final_Ts,
+	const uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ dL_dpixels_seg,
+	float3* __restrict__ dL_dmean2D,
+	float4* __restrict__ dL_dconic2D,
+	float* __restrict__ dL_dopacity,
+	float* __restrict__ dL_dseg_encoding)
+{
+	auto block = cg::this_thread_block();
+	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	const uint32_t pix_id = W * pix.y + pix.x;
+	const float2 pixf = { (float)pix.x, (float)pix.y };
+
+	const bool inside = pix.x < W&& pix.y < H;
+	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	bool done = !inside;
+	int toDo = range.y - range.x;
+
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+
+	const float T_final = inside ? final_Ts[pix_id] : 0;
+	float T = T_final;
+	uint32_t contributor = toDo;
+	const int last_contributor = inside ? n_contrib[pix_id] : 0;
+
+	float accum_rec_seg_s = 0.0f;
+	float last_seg_s = 0.0f;
+	float last_alpha = 0.0f;
+
+	const float ddelx_dx = 0.5 * W;
+	const float ddely_dy = 0.5 * H;
+
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		block.sync();
+		const int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y)
+		{
+			const int coll_id = point_list[range.y - progress - 1];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+		}
+		block.sync();
+
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		{
+			contributor--;
+			if (contributor >= last_contributor)
+				continue;
+
+			const float2 xy = collected_xy[j];
+			const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			const float4 con_o = collected_conic_opacity[j];
+			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			if (power > 0.0f)
+				continue;
+
+			const float G = exp(power);
+			const float alpha = min(0.99f, con_o.w * G);
+			if (alpha < 1.0f / 255.0f)
+				continue;
+
+			T = T / (1.f - alpha);
+			const float dchannel_dcolor = alpha * T;
+			const int global_id = collected_id[j];
+
+			float B_cur = 0.0f;
+			for (int ch = 0; ch < NUM_SEG_CHANNELS; ch++)
+			{
+				const float s = seg_encoding[global_id * NUM_SEG_CHANNELS + ch];
+				const float dL_dseg_ch = dL_dpixels_seg[ch * H * W + pix_id];
+				B_cur += dL_dseg_ch * s;
+				atomicAdd(&(dL_dseg_encoding[global_id * NUM_SEG_CHANNELS + ch]),
+				          dchannel_dcolor * dL_dseg_ch);
+			}
+			const float A_new = last_alpha * last_seg_s + (1.f - last_alpha) * accum_rec_seg_s;
+			const float dL_dalpha_seg = (B_cur - A_new) * T;
+			accum_rec_seg_s = A_new;
+			last_seg_s = B_cur;
+			last_alpha = alpha;
+
+			const float dL_dG = con_o.w * dL_dalpha_seg;
+			const float gdx = G * d.x;
+			const float gdy = G * d.y;
+			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
+			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
+
+			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
+			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha_seg);
+		}
+	}
+}
+
 void BACKWARD::render(
 	const dim3 grid, const dim3 block,
 	const uint2* ranges,
@@ -756,6 +904,7 @@ void BACKWARD::render(
 	const float* dL_dpixels_seg,
 	const float* dL_invdepths,
 	float3* dL_dmean2D,
+	float3* dL_dmean2D_photo,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
@@ -778,10 +927,28 @@ void BACKWARD::render(
 		dL_dpixels_seg,
 		dL_invdepths,
 		dL_dmean2D,
+		dL_dmean2D_photo,
 		dL_dconic2D,
 		dL_dopacity,
 		dL_dcolors,
 		dL_dseg_encoding,
 		dL_dinvdepths
 		);
+
+	// Separate segmentation-only backward pass (kept out of renderCUDA).
+	if (dL_dpixels_seg != nullptr)
+		renderSegCUDA << <grid, block >> > (
+			ranges,
+			point_list,
+			W, H,
+			means2D,
+			seg_encoding,
+			conic_opacity,
+			final_Ts,
+			n_contrib,
+			dL_dpixels_seg,
+			dL_dmean2D,
+			dL_dconic2D,
+			dL_dopacity,
+			dL_dseg_encoding);
 }
