@@ -66,6 +66,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	// the same backward pass (sgdense decoupled densification trigger). Empty =>
 	// skipped.
 	const torch::Tensor& dL_dmean2D_photo,
+	// Seg-loss decoupling: scales the segmentation share of the geometry gradient
+	// (dL_dalpha -> mean/conic/opacity) inside renderSegCUDA. 0.0 = stop-grad.
+	const float seg_geom_weight,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,

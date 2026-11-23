@@ -790,7 +790,8 @@ renderSegCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dseg_encoding)
+	float* __restrict__ dL_dseg_encoding,
+	const float seg_geom_weight)
 {
 	auto block = cg::this_thread_block();
 	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
@@ -866,23 +867,30 @@ renderSegCUDA(
 				          dchannel_dcolor * dL_dseg_ch);
 			}
 			const float A_new = last_alpha * last_seg_s + (1.f - last_alpha) * accum_rec_seg_s;
-			const float dL_dalpha_seg = (B_cur - A_new) * T;
+			// Seg-loss decoupling: scale the geometry share by seg_geom_weight
+			// (0.0 = stop-grad, so L_seg cannot move geometry). The head path
+			// (dL_dseg_encoding) above is unaffected. The A/B recurrence state stays
+			// unweighted — scaling the final alpha gradient is linear and exact.
+			const float dL_dalpha_seg = (B_cur - A_new) * T * seg_geom_weight;
 			accum_rec_seg_s = A_new;
 			last_seg_s = B_cur;
 			last_alpha = alpha;
 
-			const float dL_dG = con_o.w * dL_dalpha_seg;
-			const float gdx = G * d.x;
-			const float gdy = G * d.y;
-			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
-			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
+			if (seg_geom_weight != 0.0f)
+			{
+				const float dL_dG = con_o.w * dL_dalpha_seg;
+				const float gdx = G * d.x;
+				const float gdy = G * d.y;
+				const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
+				const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
-			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
-			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha_seg);
+				atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
+				atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+				atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
+				atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
+				atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
+				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha_seg);
+			}
 		}
 	}
 }
@@ -905,6 +913,7 @@ void BACKWARD::render(
 	const float* dL_invdepths,
 	float3* dL_dmean2D,
 	float3* dL_dmean2D_photo,
+	const float seg_geom_weight,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
@@ -950,5 +959,6 @@ void BACKWARD::render(
 			dL_dmean2D,
 			dL_dconic2D,
 			dL_dopacity,
-			dL_dseg_encoding);
+			dL_dseg_encoding,
+			seg_geom_weight);
 }

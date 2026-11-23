@@ -124,6 +124,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 grad_out_depth,
                 grad_out_seg,
                 raster_settings.dL_dmean2D_photo,
+                raster_settings.seg_geom_weight,
                 sh,
                 raster_settings.sh_degree,
                 raster_settings.campos,
@@ -136,6 +137,13 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # Compute gradients for relevant tensors by invoking backward method
         grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations, grad_seg_encoding = _C.rasterize_gaussians_backward(*args)
+
+        # Seg-loss decoupling: the head share is a distinct, seg-only output, so it
+        # is scaled here rather than in the kernel. seg_geom_weight was applied
+        # inside the rasterizer (renderSegCUDA); do NOT scale grad_out_seg itself,
+        # which feeds both the head and the geometry share.
+        if raster_settings.seg_head_weight != 1.0:
+            grad_seg_encoding = grad_seg_encoding * raster_settings.seg_head_weight
 
         grads = (
             grad_means3D,          # means3D
@@ -176,6 +184,12 @@ class GaussianRasterizationSettings(NamedTuple):
     # backward pass. Used by SGDense's decoupled densification trigger
     # (--densify_photo_grad_only) so no second autograd pass is needed.
     dL_dmean2D_photo : torch.Tensor
+    # Seg-loss decoupling: seg_geom_weight scales the segmentation share of the
+    # geometry gradient inside the rasterizer (renderSegCUDA); 0.0 = stop-grad.
+    # seg_head_weight scales the returned dL_dseg_encoding in Python; 0.0 freezes
+    # the readout head. Both are relative to lambda_seg (loss-level scale).
+    seg_geom_weight : float
+    seg_head_weight : float
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):
